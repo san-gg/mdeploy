@@ -89,10 +89,10 @@ mdeploy run --source=server.example.com --user=admin --password=password123 loca
 Copy files between local and remote servers:
 ```bash
 # Copy from local to remote
-mdeploy copy local/file.txt user:password@server.example.com:/remote/path/
+mdeploy copy local/file.txt user@server.example.com:/remote/path/ --dst-password password
 
 # Copy from remote to local
-mdeploy copy user:password@server.example.com:/remote/file.txt local/path/
+mdeploy copy --src-password password user@server.example.com:/remote/file.txt local/path/
 ```
 
 **Environment Variables**
