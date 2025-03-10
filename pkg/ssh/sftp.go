@@ -287,13 +287,11 @@ func (s *sftpclient) ReadDir(p string) ([]fileInfo, error) {
 			Handle: handle,
 		}); err1 != nil {
 			err = err1
-			done = true
 			break
 		}
 		typ, data, err1 := s.recvPacket()
 		if err1 != nil {
 			err = err1
-			done = true
 			break
 		}
 		switch typ {

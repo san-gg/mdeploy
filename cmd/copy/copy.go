@@ -10,12 +10,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
-type copyOptions struct {
-	srcPassword string
-	dstPassword string
-}
-
-var options copyOptions
+type fileProgressFunc func(progress progress.ProgressBarReaderWriter, src string, dst string) error
+type dirProgressFunc func(output chan<- string, src string, dst string) error
 
 func CopyCommand() *cobra.Command {
 	cmd := &cobra.Command{
@@ -25,9 +21,6 @@ func CopyCommand() *cobra.Command {
 		Args:  cobra.ExactArgs(2),
 		RunE:  runCopy,
 	}
-	flags := cmd.Flags()
-	flags.StringVar(&options.srcPassword, "src-password", "", "source password")
-	flags.StringVar(&options.dstPassword, "dst-password", "", "destination password")
 	return cmd
 }
 
@@ -35,111 +28,119 @@ func runCopy(cmd *cobra.Command, args []string) error {
 	if len(args) != 2 {
 		return fmt.Errorf("source and target are required")
 	}
-	if options.srcPassword != "" && options.dstPassword != "" {
-		return fmt.Errorf("both source and target password are not allowed")
-	}
 	trust, err := cmd.Flags().GetBool("trust")
 	if err != nil {
 		panic(err)
 	}
-	src := strings.Split(args[0], ":")
-	dst := strings.Split(args[1], ":")
-	if len(src) == 2 && len(dst) == 2 {
-		return fmt.Errorf("server to server copy is not supported")
-	} else if len(src) > 2 || len(dst) > 2 || (len(src) < 2 && len(dst) < 2) {
-		return fmt.Errorf("source ... target are not valid")
-	}
-	if len(dst) == 2 {
-		if options.dstPassword == "" {
-			return fmt.Errorf("destination password is required")
-		}
-		dstUserIp := strings.Split(dst[0], "@")
-		if len(dstUserIp) != 2 {
-			return fmt.Errorf("destination user@ip is not valid")
-		}
-		sshsession, err := ssh.ConnectWithPassword(dstUserIp[1], 22, dstUserIp[0], options.dstPassword, trust)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			return nil
-		}
-		defer sshsession.Close()
-		stat, err := os.Stat(src[0])
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			return nil
-		}
 
-		if stat.Mode().IsDir() {
-			ch := make(chan string)
-			defer close(ch)
-			go func() {
-				for out := range ch {
-					fmt.Println(out)
-				}
-			}()
-			if err := sshsession.SendDir(ch, src[0], dst[1]); err != nil {
-				fmt.Fprintln(os.Stderr, err)
-				return nil
-			}
-		} else if stat.Mode().IsRegular() {
-			ch := make(chan progress.NetworkBytesChan)
-			rw, done := progress.NewProgress(cmd).StartProgressBar(ch)
-			defer func() {
-				close(ch)
-				<-done
-			}()
-			if err := sshsession.SendFile(rw, src[0], dst[1]); err != nil {
-				fmt.Fprintln(os.Stderr, err)
-				return nil
-			}
-		} else {
-			fmt.Fprintln(os.Stderr, "source is not a file or directory")
-		}
-	} else {
-		if options.srcPassword == "" {
-			return fmt.Errorf("source password is required")
-		}
-		srcUserIp := strings.Split(src[0], "@")
-		if len(srcUserIp) != 2 {
-			return fmt.Errorf("source user@ip is not valid")
-		}
-		sshsession, err := ssh.ConnectWithPassword(srcUserIp[1], 22, srcUserIp[0], options.srcPassword, trust)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			return nil
-		}
-		defer sshsession.Close()
-		stat, err := sshsession.Stat(src[1])
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			return nil
-		}
-		if stat.IsDir() {
-			ch := make(chan string)
-			defer close(ch)
-			go func() {
-				for out := range ch {
-					fmt.Println(out)
-				}
-			}()
-			if err := sshsession.SendDir(ch, src[1], dst[0]); err != nil {
-				fmt.Fprintln(os.Stderr, err)
-				return nil
-			}
-		} else if stat.IsRegular() {
-			ch := make(chan progress.NetworkBytesChan)
-			rw, done := progress.NewProgress(cmd).StartProgressBar(ch)
-			defer func() {
-				close(ch)
-				<-done
-			}()
-			if err := sshsession.SendFile(rw, src[1], dst[0]); err != nil {
-				fmt.Fprintln(os.Stderr, err)
-				return nil
-			}
-		} else {
-			fmt.Fprintln(os.Stderr, "source is not a file or directory")
-		}
+	sip, suser, spwd, spath, sok := parseRemotePath(args[0])
+	dip, duser, dpwd, dpath, dok := parseRemotePath(args[1])
+
+	if sok && dok {
+		return fmt.Errorf("remote to remote copy is not supported")
 	}
-	return nil
+
+	if sok {
+		remoteReceive(spath, suser, sip, spwd, args[1], trust, cmd)
+		return nil
+	} else if dok {
+		remoteCopy(args[0], duser, dip, dpwd, dpath, trust, cmd)
+		return nil
+	}
+
+	return fmt.Errorf("source ... target are not valid")
+}
+
+func parseRemotePath(remote string) (ip string, user string, password string, path string, ok bool) {
+	// user:pwd@ip:/path
+	parts := strings.Split(remote, ":")
+	if len(parts) != 3 {
+		return
+	}
+	user = parts[0]
+	path = parts[2]
+	pwdIp := strings.Split(parts[1], "@")
+	if len(pwdIp) != 2 {
+		return
+	}
+	password = pwdIp[0]
+	ip = pwdIp[1]
+	ok = true
+	return
+}
+
+func remoteCopy(src, user, ip, pwd, dst string, trust bool, cmd *cobra.Command) {
+	sshsession, err := ssh.ConnectWithPassword(ip, 22, user, pwd, trust)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return
+	}
+	defer sshsession.Close()
+
+	stat, err := os.Stat(src)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return
+	}
+	if stat.Mode().IsDir() {
+		dirProgress(src, dst, sshsession.SendDir)
+	} else if stat.Mode().IsRegular() {
+		fileProgress(src, dst, sshsession.SendFile, cmd)
+	} else {
+		fmt.Fprintln(os.Stderr, "source is not a file or directory")
+	}
+}
+
+func remoteReceive(src, user, ip, pwd, dst string, trust bool, cmd *cobra.Command) {
+	sshsession, err := ssh.ConnectWithPassword(ip, 22, user, pwd, trust)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return
+	}
+	defer sshsession.Close()
+
+	stat, err := sshsession.Stat(src)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return
+	}
+
+	if stat.IsDir() {
+		dirProgress(src, dst, sshsession.ReceiveRemoteDir)
+	} else if stat.IsRegular() {
+		fileProgress(src, dst, sshsession.ReceiveRemoteFile, cmd)
+	} else {
+		fmt.Fprintln(os.Stderr, "source is not a file or directory")
+	}
+}
+
+func fileProgress(src string, dst string, fileFunc fileProgressFunc, cmd *cobra.Command) {
+	if fileFunc == nil {
+		panic("fileFunc is nil")
+	}
+	ch := make(chan progress.NetworkBytesChan)
+	rw, done := progress.NewProgress(cmd).StartProgressBar(ch)
+	defer func() {
+		close(ch)
+		<-done
+	}()
+	if err := fileFunc(rw, src, dst); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+	}
+}
+
+func dirProgress(src string, dst string, dirFunc dirProgressFunc) {
+	if dirFunc == nil {
+		panic("dirFunc is nil")
+	}
+	ch := make(chan string)
+	defer close(ch)
+	go func() {
+		for out := range ch {
+			fmt.Println(out)
+		}
+	}()
+	if err := dirFunc(ch, src, dst); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+	}
 }

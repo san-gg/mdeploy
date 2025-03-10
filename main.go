@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"os"
 
 	copy "github.com/san-gg/mdeploy/cmd/copy"
@@ -30,7 +29,6 @@ func main() {
 	rootCmd.CompletionOptions.DisableDefaultCmd = true
 
 	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err.Error())
 		os.Exit(1)
 	}
 }
