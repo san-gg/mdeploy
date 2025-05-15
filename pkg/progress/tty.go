@@ -1,4 +1,4 @@
-package mdeploy
+package progress
 
 import (
 	"fmt"
@@ -25,10 +25,10 @@ var (
 )
 
 var (
-	startedStatus   = statusColor("Started  ")
-	runningStatus   = statusColor("Running  ")
+	startedStatus   = statusColor(" Started ")
+	runningStatus   = statusColor(" Running ")
 	completedStatus = successColor("Completed")
-	failedStatus    = failedColor("Failed   ")
+	failedStatus    = failedColor(" Failed  ")
 	cancelledStatus = failedColor("Cancelled")
 	doneSpinner     = spinnerDoneColor("✔")
 	failedSpinner   = spinnerFailedColor("✖")
@@ -54,9 +54,17 @@ func (s *loader) get() string {
 var strip loader = loader{
 	time:         time.Now(),
 	index:        0,
-	chars:        []string{ellipsesColor("."), ellipsesColor(".."), ellipsesColor("..."), ellipsesColor("....")},
+	chars:        []string{".", "..", "...", "...."},
 	color:        ellipsesColor,
 	millisecDiff: 250,
+}
+
+var spinner loader = loader{
+	time:         time.Now(),
+	index:        0,
+	chars:        []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"},
+	color:        countColor,
+	millisecDiff: 80,
 }
 
 type entry struct {
@@ -65,11 +73,10 @@ type entry struct {
 		startTime      time.Time
 		endTimeElapsed float64
 	}
-	output ProgressOutput
+	output EventOutputWriter
 }
 
-type ttyWritter struct {
-	spinner        loader
+type ttyWriter struct {
 	events         map[uint32]*entry
 	eventIds       []uint32
 	done           chan bool
@@ -79,16 +86,17 @@ type ttyWritter struct {
 	maxNameLen     int
 }
 
-func (t *ttyWritter) Start(wg *sync.WaitGroup) {
+func (t *ttyWriter) StartEvent() {
 	go func() {
-		defer wg.Done()
+		defer func() {
+			t.done <- true
+		}()
 		ticker := time.NewTicker(70 * time.Millisecond)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-t.done:
 				t.print()
-				close(t.done)
 				return
 			case <-ticker.C:
 				t.print()
@@ -97,11 +105,17 @@ func (t *ttyWritter) Start(wg *sync.WaitGroup) {
 	}()
 }
 
-func (t *ttyWritter) Stop() {
+func (t *ttyWriter) StopEvent() {
 	t.done <- true
+	<-t.done
+	close(t.done)
+	clear(t.eventIds)
+	for e := range t.events {
+		delete(t.events, e)
+	}
 }
 
-func (t *ttyWritter) SetStatus(e *Event) {
+func (t *ttyWriter) SetStatus(e *Event) {
 	t.mtx.Lock()
 	defer t.mtx.Unlock()
 	if t.done == nil {
@@ -132,7 +146,36 @@ func (t *ttyWritter) SetStatus(e *Event) {
 	}
 }
 
-func (t *ttyWritter) print() {
+func (t *ttyWriter) SetEventOutput(e *Event, eventOutput EventOutputWriter) {
+	t.mtx.Lock()
+	defer t.mtx.Unlock()
+	if eventOutput == nil {
+		panic("eventOutput is nil")
+	}
+	if t.done == nil {
+		panic("ttyWritter is not started")
+	}
+	ee, ok := t.events[e.Id]
+	if !ok {
+		panic("event not found")
+	}
+	ee.output = eventOutput
+}
+
+func (t *ttyWriter) UnSetEventOutput(e *Event) {
+	t.mtx.Lock()
+	defer t.mtx.Unlock()
+	if t.done == nil {
+		panic("ttyWritter is not started")
+	}
+	ee, ok := t.events[e.Id]
+	if !ok {
+		panic("event not found")
+	}
+	ee.output = nil
+}
+
+func (t *ttyWriter) print() {
 	t.mtx.Lock()
 	defer t.mtx.Unlock()
 	if len(t.events) == 0 {
@@ -148,19 +191,19 @@ func (t *ttyWritter) print() {
 	defer func() {
 		fmt.Fprint(os.Stdout, aec.Show)
 	}()
-	window_width, window_height, err := getWinSize()
+	window_width, window_height, err := GetWinSize()
 	window_height -= 4
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error getting window size: ", err)
 		fmt.Fprintln(os.Stderr, "Stopping progress")
-		t.Stop()
+		t.StopEvent()
 		return
 	}
 	if window_width < 60 {
-		line(t, "...", nil, window_width, nil)
+		t.line("...", nil, window_width, nil)
 		return
 	}
-	line(t, fmt.Sprintf("[+] Running %d/%d", t.completedCount, len(t.events)), countColor, window_width, nil)
+	t.line(fmt.Sprintf("[+] Running %d/%d", t.completedCount, len(t.events)), countColor, window_width, nil)
 outer:
 	for _, eId := range t.eventIds {
 		e := t.events[eId]
@@ -168,11 +211,11 @@ outer:
 			e.eventElapsed.endTimeElapsed = time.Since(e.eventElapsed.startTime).Seconds()
 		}
 		if t.lastNumLines >= uint(window_height) {
-			line(t, strip.get(), nil, window_width, nil)
+			t.line(strip.get(), nil, window_width, nil)
 			break
 		}
 
-		line(t, "", nil, window_width, e)
+		t.line("", nil, window_width, e)
 
 		var count, totalCount int
 		if len(t.eventIds) == 1 {
@@ -180,24 +223,26 @@ outer:
 		} else {
 			totalCount = 5
 		}
-		for _, o := range getEventOutput(e, window_width) {
-			if t.lastNumLines >= uint(window_height) {
-				line(t, strip.get(), nil, window_width, nil)
-				break outer
+		if e.output != nil {
+			for _, o := range e.output.GetOutput() {
+				if t.lastNumLines >= uint(window_height) {
+					t.line(strip.get(), nil, window_width, nil)
+					break outer
+				}
+				if count == totalCount {
+					break
+				}
+				t.line("        "+o, eventOutputColor, window_width, nil)
+				count++
 			}
-			if count == totalCount {
-				break
-			}
-			line(t, "        "+o, eventOutputColor, window_width, nil)
-			count++
 		}
 	}
 }
 
-func line(t *ttyWritter, line string, color colorFunc, window_width int, e *entry) {
+func (t *ttyWriter) line(line string, color colorFunc, window_width int, e *entry) {
 	if e != nil {
 		var status, elapsed string
-		spinner := t.spinner.get()
+		spinner := spinner.get()
 		switch e.event.Status {
 		case STARTED:
 			status = startedStatus
@@ -214,9 +259,9 @@ func line(t *ttyWritter, line string, color colorFunc, window_width int, e *entr
 			spinner = failedSpinner
 		}
 		if e.eventElapsed.endTimeElapsed <= 60 {
-			elapsed = fmt.Sprintf("%.1fs", e.eventElapsed.endTimeElapsed)
+			elapsed = TimerColor(fmt.Sprintf("%.1fs", e.eventElapsed.endTimeElapsed))
 		} else {
-			elapsed = fmt.Sprintf("%.1fm", e.eventElapsed.endTimeElapsed/60)
+			elapsed = TimerColor(fmt.Sprintf("%.1fm", e.eventElapsed.endTimeElapsed/60))
 		}
 		line = fmt.Sprintf("  %s  %s%s%s ", spinner, e.event.EventName, strings.Repeat(" ", t.maxNameLen-len(e.event.EventName)+1), status)
 		if window_width < len(line) {
@@ -232,7 +277,7 @@ func line(t *ttyWritter, line string, color colorFunc, window_width int, e *entr
 				line = line + m
 				msgArea -= len(m)
 			}
-			line = line + strings.Repeat(" ", msgArea) + TimerColor(elapsed)
+			line = line + strings.Repeat(" ", msgArea) + elapsed
 		}
 	} else if int(window_width) < len(line) {
 		line = line[:window_width-8] + "..."
@@ -244,139 +289,121 @@ func line(t *ttyWritter, line string, color colorFunc, window_width int, e *entr
 	t.lastNumLines++
 }
 
-func getEventOutput(e *entry, window_width int) []string {
-	if e.output == nil {
-		return nil
-	}
-	return e.output.GetOutput(window_width)
-}
-
-func (t *ttyWritter) WaitEventOutput(e *Event) {
-	t.mtx.Lock()
-	entry, ok := t.events[e.Id]
-	if !ok {
-		panic("Event wasn't added to stop")
-	}
-	t.mtx.Unlock()
-	if entry.output == nil {
-		panic("EventOutput not initialized")
-	}
-	entry.output.Wait()
-	entry.output = nil
-}
-
-func (t *ttyWritter) StartTextEventOutput(ch <-chan string, e *Event) {
-	t.mtx.Lock()
-	defer t.mtx.Unlock()
-	entry, ok := t.events[e.Id]
-	if !ok {
-		panic("Event wasn't added to start text output")
-	}
-	if entry.output != nil {
-		panic("StartTextEventOutput already started")
-	}
-	eto := &entryTextOutput{
-		done:      make(chan bool, 1),
-		completed: false,
-	}
-	entry.output = eto
-	go func() {
-		for o := range ch {
-			eto.mtx.Lock()
-			eto.output = append(eto.output, o)
-			eto.mtx.Unlock()
-		}
-		eto.mtx.Lock()
-		eto.completed = true
-		eto.mtx.Unlock()
-	}()
-}
-
-func (t *ttyWritter) StartProgressBarEventOutput(ch chan NetworkBytesChan, e *Event) ProgressBarReaderWriter {
-	t.mtx.Lock()
-	defer t.mtx.Unlock()
-	entry, ok := t.events[e.Id]
-	if !ok {
-		panic("Event wasn't added to start progress bar")
-	}
-	if entry.output != nil {
-		panic("StartTextEventOutput already started")
-	}
-	eto := &entryProgressBarOutput{
-		startTime: time.Now(),
-		done:      make(chan bool, 1),
-		completed: false,
-	}
-	entry.output = eto
-	go func() {
-		for cp := range ch {
-			percentage := float64(cp.bytesRead) / float64(cp.size) * 100
-			speed := float64(cp.bytesRead) / time.Since(eto.startTime).Seconds()
-
-			eto.mtx.Lock()
-			eto.percentage = percentage
-			eto.speed = speed
-			eto.mtx.Unlock()
-		}
-		eto.mtx.Lock()
-		eto.completed = true
-		eto.mtx.Unlock()
-	}()
-	return &remoteCopy{
-		startTime: time.Now(),
-		ch:        ch,
-	}
-}
-
-func (t *ttyWritter) StartProgressBar(ch chan NetworkBytesChan) (ProgressBarReaderWriter, chan bool) {
-	done := make(chan bool)
-	go func() {
-		startTime := time.Now()
-		written := false
-		for cp := range ch {
-			percentage := float64(cp.bytesRead) / float64(cp.size) * 100
-			speed := float64(cp.bytesRead) / time.Since(startTime).Seconds()
-			w, _, err := getWinSize()
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "Error getting window size: ", err)
-				fmt.Fprintln(os.Stderr, "Stopping progress")
-				return
-			}
-			fmt.Fprint(os.Stdout, aec.Hide)
-			if written {
-				fmt.Fprint(os.Stdout, aec.Up(1))
-				fmt.Fprint(os.Stdout, aec.EraseLine(aec.EraseModes.All))
-			}
-			if w < 50 {
-				fmt.Println("...")
-				written = true
-				continue
-			}
-			fmt.Println("  " + getProgressBarString(percentage, speed, w))
-			fmt.Fprint(os.Stdout, aec.Show)
-			written = true
-		}
-		done <- true
-	}()
-	return &remoteCopy{
-		ch:        ch,
-		startTime: time.Now(),
-	}, done
-}
-
-func newTTyWritter() *ttyWritter {
-	return &ttyWritter{
+func newEventTTyWriter() *ttyWriter {
+	return &ttyWriter{
 		done:           make(chan bool),
 		events:         make(map[uint32]*entry),
 		lastNumLines:   0,
 		completedCount: 0,
 		maxNameLen:     0,
-		spinner: loader{
-			time:         time.Now(),
-			index:        0,
-			chars:        []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"},
-			color:        countColor,
-			millisecDiff: 80,
-		},
+	}
+}
+
+type progressBarWriter struct {
+	sync.Mutex
+	finalProgressBar string
+	progressBar      string
+	isEventOutput    bool
+	outprint         bool
+	ticker           time.Time
+}
+
+func (e *progressBarWriter) Completed() {
+	if !e.isEventOutput {
+		fmt.Fprint(os.Stdout, aec.Up(1))
+		fmt.Fprint(os.Stdout, aec.EraseLine(aec.EraseModes.All))
+		fmt.Fprintln(os.Stdout, doneSpinner+e.finalProgressBar)
+	}
+}
+
+func (e *progressBarWriter) Write(b []byte) (n int, err error) {
+	n = len(b)
+	if e.isEventOutput {
+		e.Lock()
+		defer e.Unlock()
+		e.progressBar = string(b)
+	} else if time.Since(e.ticker) > 1*time.Second {
+		if e.outprint {
+			fmt.Fprint(os.Stdout, aec.Up(1))
+			fmt.Fprint(os.Stdout, aec.EraseLine(aec.EraseModes.All))
+		}
+		e.progressBar = " " + eventOutputColor(string(b))
+		fmt.Fprintln(os.Stdout, spinner.get()+e.progressBar)
+		e.outprint = true
+		e.ticker = time.Now()
+	} else if e.outprint {
+		fmt.Fprint(os.Stdout, aec.Up(1))
+		fmt.Fprint(os.Stdout, aec.EraseLine(aec.EraseModes.All))
+		fmt.Fprintln(os.Stdout, spinner.get()+e.progressBar)
+	}
+	e.finalProgressBar = " " + eventOutputColor(string(b))
+	return
+}
+
+func (e *progressBarWriter) GetOutput() []string {
+	e.Lock()
+	defer e.Unlock()
+	return []string{e.progressBar}
+}
+
+func (e *progressBarWriter) Wait() {
+	e.Lock()
+	defer e.Unlock()
+	e.progressBar = ""
+}
+
+func newProgressBarTTyWritter() *progressBarWriter {
+	return &progressBarWriter{isEventOutput: false, ticker: time.Now()}
+}
+
+func newEventOutputProgressBarTTyWritter() *progressBarWriter {
+	return &progressBarWriter{progressBar: "", isEventOutput: true}
+}
+
+type eventOutputWriter struct {
+	sync.Mutex
+	output              []string
+	doWaitForCompletion bool
+	done                chan bool
+}
+
+func (e *eventOutputWriter) Write(b []byte) (n int, err error) {
+	n = len(b)
+	e.Lock()
+	defer e.Unlock()
+	e.output = append(e.output, string(b))
+	return
+}
+
+func (e *eventOutputWriter) GetOutput() []string {
+	e.Lock()
+	defer e.Unlock()
+	if len(e.output) == 0 && e.doWaitForCompletion && e.done != nil {
+		e.done <- true
+		close(e.done)
+		e.done = nil
+		e.doWaitForCompletion = false
+		return nil
+	} else if len(e.output) == 0 {
+		return nil
+	} else if len(e.output) < 5 && e.doWaitForCompletion == false {
+		return e.output
+	}
+	e.output = e.output[1:]
+	return e.output
+}
+
+func (e *eventOutputWriter) Wait() {
+	e.Lock()
+	e.doWaitForCompletion = true
+	e.Unlock()
+	<-e.done
+}
+
+func newEventOutputTTyWriter() *eventOutputWriter {
+	return &eventOutputWriter{
+		output:              make([]string, 0),
+		doWaitForCompletion: false,
+		done:                make(chan bool),
 	}
 }

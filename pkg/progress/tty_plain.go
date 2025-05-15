@@ -1,4 +1,4 @@
-package mdeploy
+package progress
 
 import (
 	"fmt"
@@ -6,67 +6,93 @@ import (
 	"time"
 )
 
-type ttyPlainWritter struct{}
+type ttyPlainWritter struct {
+	eventOutputCompletion map[string]chan bool
+}
 
-func (t *ttyPlainWritter) Start(wg *sync.WaitGroup) {}
+func (t *ttyPlainWritter) StartEvent() {}
 
-func (t *ttyPlainWritter) Stop() {}
+func (t *ttyPlainWritter) StopEvent() {}
 
 func (t *ttyPlainWritter) SetStatus(e *Event) {
 	fmt.Println(e.EventName, ":", e.Message)
 }
-func (t *ttyPlainWritter) StartTextEventOutput(ch <-chan string, e *Event) {
-	go func() {
-		for o := range ch {
-			fmt.Println(e.EventName, "::", o)
-		}
-	}()
-}
-func (t *ttyPlainWritter) StartProgressBarEventOutput(ch chan NetworkBytesChan, e *Event) ProgressBarReaderWriter {
-	go func() {
-		for cp := range ch {
-			percentage := float64(cp.bytesRead) / float64(cp.size) * 100
-			speed := float64(cp.bytesRead) / time.Since(time.Now()).Seconds()
-			var currspeed string
-			if speed < 1024 {
-				currspeed = fmt.Sprintf("%.2f KB/s", speed)
-			} else {
-				currspeed = fmt.Sprintf("%.2f MB/s", speed/(1024*1024))
+
+func (t *ttyPlainWritter) SetEventOutput(e *Event, eventOutput EventOutputWriter) {
+	if _, ok := t.eventOutputCompletion[e.EventName]; ok {
+		panic("EventOut already added: " + e.EventName)
+	}
+	t.eventOutputCompletion[e.EventName] = make(chan bool)
+	go func(eventName, message string, eventOutput EventOutputWriter) {
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-t.eventOutputCompletion[eventName]:
+				for _, v := range eventOutput.GetOutput() {
+					fmt.Println(eventName, ":", message, ":", v)
+				}
+				return
+			case <-ticker.C:
+				for _, v := range eventOutput.GetOutput() {
+					fmt.Println(eventName, ":", message, ":", v)
+				}
 			}
-			fmt.Printf("%s: %.2f%% %s\n", e.EventName, percentage, currspeed)
 		}
-	}()
-	return &remoteCopy{
-		startTime: time.Now(),
-		ch:        ch,
+	}(e.EventName, e.Message, eventOutput)
+}
+
+func (t *ttyPlainWritter) UnSetEventOutput(e *Event) {
+	if _, ok := t.eventOutputCompletion[e.EventName]; ok {
+		t.eventOutputCompletion[e.EventName] <- true
+		close(t.eventOutputCompletion[e.EventName])
+		delete(t.eventOutputCompletion, e.EventName)
 	}
 }
-func (t *ttyPlainWritter) WaitEventOutput(e *Event) {
+
+func newEventTTyPlainWriter() *ttyPlainWritter {
+	return &ttyPlainWritter{
+		eventOutputCompletion: make(map[string]chan bool),
+	}
 }
 
-func (t *ttyPlainWritter) StartProgressBar(ch chan NetworkBytesChan) (ProgressBarReaderWriter, chan bool) {
-	done := make(chan bool)
-	go func() {
-		startTime := time.Now()
-		for cp := range ch {
-			percentage := float64(cp.bytesRead) / float64(cp.size) * 100
-			speed := float64(cp.bytesRead) / time.Since(startTime).Seconds()
-			var currspeed string
-			if speed < 1024 {
-				currspeed = fmt.Sprintf("%.2f KB/s", speed)
-			} else {
-				currspeed = fmt.Sprintf("%.2f MB/s", speed/(1024*1024))
-			}
-			fmt.Printf("%.2f%% %s\n", percentage, currspeed)
-		}
-		done <- true
-	}()
-	return &remoteCopy{
-		ch:        ch,
-		startTime: time.Now(),
-	}, done
+type ttyOutputPlainWriter struct {
+	sync.Mutex
+	output        []string
+	isEventOutput bool
 }
 
-func newTTyPlainWritter() *ttyPlainWritter {
-	return &ttyPlainWritter{}
+func (p *ttyOutputPlainWriter) Completed() {}
+
+func (p *ttyOutputPlainWriter) Write(b []byte) (n int, err error) {
+	n = len(b)
+	if p.isEventOutput {
+		p.Lock()
+		defer p.Unlock()
+		p.output = append(p.output, string(b))
+	} else {
+		fmt.Println(string(b))
+	}
+	return
+}
+
+func (p *ttyOutputPlainWriter) GetOutput() []string {
+	p.Lock()
+	defer p.Unlock()
+	if len(p.output) == 0 {
+		return nil
+	}
+	t := p.output
+	p.output = []string{}
+	return t
+}
+
+func (p *ttyOutputPlainWriter) Wait() {}
+
+func newTTyPlainWritter() *ttyOutputPlainWriter {
+	return &ttyOutputPlainWriter{isEventOutput: false}
+}
+
+func newTTyOutputPlainWritter() *ttyOutputPlainWriter {
+	return &ttyOutputPlainWriter{isEventOutput: true}
 }

@@ -1,4 +1,4 @@
-package mdeploy
+package ssh
 
 import (
 	"fmt"
@@ -87,6 +87,7 @@ type sftpclient struct {
 	nextid                uint32
 	maxPacket             uint32
 	maxConcurrentRequests int
+	useConcurrency        bool
 }
 
 func (s *sftpclient) Close() {
@@ -391,7 +392,7 @@ func (s *sftpclient) RemoveDirectory(path string) error {
 	}
 }
 
-func NewSFTPClient(conn *ssh.Client) (*sftpclient, error) {
+func NewSFTPClient(conn *ssh.Client, useConcurrency bool) (*sftpclient, error) {
 	s, err := conn.NewSession()
 	if err != nil {
 		return nil, err
@@ -413,8 +414,9 @@ func NewSFTPClient(conn *ssh.Client) (*sftpclient, error) {
 			reader: pr,
 			write:  pw,
 		},
-		maxPacket:             192 * 1024,
+		maxPacket:             261120,
 		maxConcurrentRequests: 64,
+		useConcurrency:        useConcurrency,
 	}
 
 	if err := sftp.checkVersion(); err != nil {

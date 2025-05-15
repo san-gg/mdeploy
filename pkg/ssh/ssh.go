@@ -1,4 +1,4 @@
-package mdeploy
+package ssh
 
 import (
 	"bufio"
@@ -10,11 +10,10 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
-
-	p "github.com/san-gg/mdeploy/pkg/progress"
 )
 
 type FileStat interface {
@@ -24,21 +23,24 @@ type FileStat interface {
 
 type SshSession interface {
 	Stat(path string) (FileStat, error)
-	SendDir(output chan<- string, src, dst string) error
-	SendFile(progress p.ProgressBarReaderWriter, src, dst string) error
-	Exec(output chan<- string, cmd string, param ...string) error
-	ReceiveRemoteFile(progress p.ProgressBarReaderWriter, remoteSrc, dst string) error
-	ReceiveRemoteDir(output chan<- string, remoteDir, dst string) error
+	SendDir(progress io.Writer, src, dst string) error
+	SendFile(progress io.Writer, src, dst string) error
+	Exec(cmdOutput io.Writer, cmd string, param ...string) error
+	ReceiveRemoteFile(progress io.Writer, remoteSrc, dst string) error
+	ReceiveRemoteDir(progress io.Writer, remoteDir, dst string) error
 	RemoveFile(path string) error
 	Mkdir(path string) error
 	RemoveDirectory(path string) error
 	RemoveAll(srcdir string) error
+	SetSftpConcurrency(concurrency bool)
 	Close()
 }
 
 const knownhostFile = ".known_hosts"
 
 var knownHostKeyCallback ssh.HostKeyCallback
+
+type sftpFunc func(progress *progressCopy, src, dest string) error
 
 type sshSession struct {
 	sftp            *sftpclient
@@ -72,7 +74,7 @@ func (s *sshSession) serverHostKey(hostname string, remote net.Addr, key ssh.Pub
 	return nil
 }
 
-func (s *sshSession) Exec(output chan<- string, command string, args ...string) error {
+func (s *sshSession) Exec(cmdOutput io.Writer, command string, args ...string) error {
 	session, err := s.client.NewSession()
 	if err != nil {
 		return fmt.Errorf("failed to create session")
@@ -86,28 +88,26 @@ func (s *sshSession) Exec(output chan<- string, command string, args ...string) 
 	if err != nil {
 		return fmt.Errorf("failed to create session")
 	}
-	if output != nil {
-		done := make(chan bool, 2)
-		defer func() {
-			<-done
-			<-done
-			close(done)
-		}()
-		go func() {
-			scanner := bufio.NewScanner(stdout)
-			for scanner.Scan() {
-				output <- scanner.Text()
-			}
-			done <- true
-		}()
-		go func() {
-			scanner := bufio.NewScanner(stderr)
-			for scanner.Scan() {
-				output <- scanner.Text()
-			}
-			done <- true
-		}()
-	}
+	done := make(chan bool, 2)
+	defer func() {
+		<-done
+		<-done
+		close(done)
+	}()
+	go func() {
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			cmdOutput.Write(scanner.Bytes())
+		}
+		done <- true
+	}()
+	go func() {
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			cmdOutput.Write(scanner.Bytes())
+		}
+		done <- true
+	}()
 	if err := session.Start(command + " " + strings.Join(args, " ")); err != nil {
 		return err
 	}
@@ -151,7 +151,7 @@ func (s *sshSession) Mkdir(dirPath string) error {
 	return s.sftp.Mkdir(dirPath)
 }
 
-func sendfile(progress p.ProgressBarReaderWriter, s *sshSession, src string, dest string) error {
+func (s *sshSession) sendfile(progress *progressCopy, src, dest string) error {
 	sfileStat, err := os.Stat(src)
 	if err != nil {
 		return err
@@ -161,7 +161,9 @@ func sendfile(progress p.ProgressBarReaderWriter, s *sshSession, src string, des
 		return err
 	}
 	defer sfile.Close()
+
 	var r io.Reader = sfile
+
 	if progress != nil {
 		progress.SetReader(sfile)
 		progress.SetSize(sfileStat.Size())
@@ -173,18 +175,80 @@ func sendfile(progress p.ProgressBarReaderWriter, s *sshSession, src string, des
 		return err
 	}
 	defer dfile.close()
-	if _, err := dfile.readFrom(r); err != nil {
+
+	if _, err := dfile.readFrom(r, sfileStat.Size(), s.sftp.useConcurrency); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (s *sshSession) receivefile(progress *progressCopy, remoteSrc, dest string) error {
+	remoteFile, err := s.sftp.Open(remoteSrc)
+	if err != nil {
+		return err
+	}
+	defer remoteFile.close()
+	localFile, err := os.Create(dest)
+	if err != nil {
+		return err
+	}
+	var w io.Writer = localFile
+	stat, _ := s.sftp.Stat(remoteSrc)
+	if progress != nil {
+		progress.SetWriter(localFile)
+		progress.SetSize(int64(stat.size))
+		w = progress
+	}
+	defer localFile.Close()
+	if _, err := remoteFile.writeTo(w, int64(stat.size), s.sftp.useConcurrency); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (s *sshSession) SendFile(progress p.ProgressBarReaderWriter, src string, dest string) error {
-	var err error
+func sftp(output io.Writer, src, dest string, sftpfunc sftpFunc, isReader bool) error {
+	var ch chan networkBytes
+	var progress *progressCopy
 
+	if output != nil {
+		ch = make(chan networkBytes)
+		defer close(ch)
+
+		go func() {
+			p := progressBar{}
+			for n := range ch {
+				output.Write([]byte(p.getProgressBarString(n)))
+			}
+		}()
+		progress = &progressCopy{
+			reader:    nil,
+			writer:    nil,
+			bytesRead: 0,
+			size:      0,
+			ch:        ch,
+			isReader:  isReader,
+			isWriter:  !isReader,
+		}
+	}
+	return sftpfunc(progress, src, dest)
+}
+
+func (s *sshSession) SendFile(progress io.Writer, src string, dest string) error {
+	var err error
 	src, err = filepath.Abs(src)
 	if err != nil {
 		return err
+	}
+
+	srcStat, err := os.Stat(src)
+
+	if err != nil {
+		return err
+	}
+
+	if srcStat.IsDir() {
+		panic(fmt.Sprintf("SendFile: %s is directory, src is supposed to be file not directory", src))
 	}
 
 	dest, err = remoterealpath(s, dest)
@@ -198,26 +262,10 @@ func (s *sshSession) SendFile(progress p.ProgressBarReaderWriter, src string, de
 		dest = path.Join(dest, filepath.Base(src))
 	}
 
-	matches, err := filepath.Glob(src)
-
-	if err != nil {
-		return err
-	}
-
-	if len(matches) > 1 && isDir {
-		return fmt.Errorf("cannot copy multiple files to a single file")
-	}
-
-	for _, file := range matches {
-		if err = sendfile(progress, s, file, dest); err != nil {
-			return err
-		}
-	}
-
-	return nil
+	return sftp(progress, src, dest, s.sendfile, true)
 }
 
-func (s *sshSession) SendDir(output chan<- string, src string, dest string) error {
+func (s *sshSession) SendDir(progress io.Writer, src string, dest string) error {
 	var err error
 	src, err = filepath.Abs(src)
 	if err != nil {
@@ -238,49 +286,33 @@ func (s *sshSession) SendDir(output chan<- string, src string, dest string) erro
 	if err != nil {
 		return err
 	}
+
 	for _, file := range files {
 		if file.Name() == "." || file.Name() == ".." {
 			continue
 		}
 		if file.Type().IsDir() {
-			s.SendDir(output, path.Join(src, file.Name()), path.Join(dest, file.Name()))
+			s.SendDir(progress, path.Join(src, file.Name()), path.Join(dest, file.Name()))
 		} else if file.Type().IsRegular() {
-			if output != nil {
-				output <- path.Join(dest, file.Name())
-			}
-			if err := sendfile(nil, s, path.Join(src, file.Name()), path.Join(dest, file.Name())); err != nil {
+			start := time.Now()
+			srcF := path.Join(src, file.Name())
+			if err := s.sendfile(nil, srcF, path.Join(dest, file.Name())); err != nil {
 				return err
+			}
+			if progress != nil {
+				seconds := time.Since(start).Seconds()
+				if seconds > 120 {
+					progress.Write([]byte(fmt.Sprintf("%s - %0.2f min", srcF, seconds/60)))
+				} else {
+					progress.Write([]byte(fmt.Sprintf("%s - %0.2f sec", srcF, seconds)))
+				}
 			}
 		}
 	}
 	return nil
 }
 
-func receivefile(progress p.ProgressBarReaderWriter, s *sshSession, remoteSrc string, dest string) error {
-	remoteFile, err := s.sftp.Open(remoteSrc)
-	if err != nil {
-		return err
-	}
-	defer remoteFile.close()
-	localFile, err := os.Create(dest)
-	if err != nil {
-		return err
-	}
-	var w io.Writer = localFile
-	if progress != nil {
-		stat, _ := s.sftp.Stat(remoteSrc)
-		progress.SetWriter(localFile)
-		progress.SetSize(int64(stat.size))
-		w = progress
-	}
-	defer localFile.Close()
-	if _, err := remoteFile.writeTo(w); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (s *sshSession) ReceiveRemoteFile(progress p.ProgressBarReaderWriter, remoteSrc string, dest string) error {
+func (s *sshSession) ReceiveRemoteFile(progress io.Writer, remoteSrc string, dest string) error {
 	remoteSrc, err := remoterealpath(s, remoteSrc)
 	if err != nil {
 		return err
@@ -303,10 +335,11 @@ func (s *sshSession) ReceiveRemoteFile(progress p.ProgressBarReaderWriter, remot
 			return fmt.Errorf("file already exists")
 		}
 	}
-	return receivefile(progress, s, remoteSrc, dest)
+
+	return sftp(progress, remoteSrc, dest, s.receivefile, false)
 }
 
-func (s *sshSession) ReceiveRemoteDir(output chan<- string, remoteDir string, destDir string) error {
+func (s *sshSession) ReceiveRemoteDir(progress io.Writer, remoteDir string, destDir string) error {
 	remoteDir, err := remoterealpath(s, remoteDir)
 	if err != nil {
 		return err
@@ -329,15 +362,22 @@ func (s *sshSession) ReceiveRemoteDir(output chan<- string, remoteDir string, de
 
 	for _, file := range remoteDirFiles {
 		if file.stat.IsDir() {
-			if err := s.ReceiveRemoteDir(output, path.Join(remoteDir, file.name), destDir); err != nil {
+			if err := s.ReceiveRemoteDir(progress, path.Join(remoteDir, file.name), destDir); err != nil {
 				return err
 			}
 		} else if file.stat.IsRegular() {
-			if output != nil {
-				output <- path.Join(destDir, file.name)
-			}
-			if err := receivefile(nil, s, path.Join(remoteDir, file.name), path.Join(destDir, file.name)); err != nil {
+			start := time.Now()
+			rsrc := path.Join(remoteDir, file.name)
+			if err := s.receivefile(nil, rsrc, path.Join(destDir, file.name)); err != nil {
 				return err
+			}
+			if progress != nil {
+				seconds := time.Since(start).Seconds()
+				if seconds > 120 {
+					progress.Write([]byte(fmt.Sprintf("%s - %0.2f min", rsrc, seconds/60)))
+				} else {
+					progress.Write([]byte(fmt.Sprintf("%s - %0.2f sec", rsrc, seconds)))
+				}
 			}
 		}
 	}
@@ -383,32 +423,45 @@ func (s *sshSession) RemoveAll(srcdir string) error {
 	return s.sftp.RemoveDirectory(srcdir)
 }
 
-func ConnectWithPassword(src string, port int, user string, password string, trustServerHost bool) (SshSession, error) {
+func (s *sshSession) SetSftpConcurrency(concurrency bool) {
+	s.sftp.useConcurrency = concurrency
+}
+
+func ConnectWithPassword(opt Options) (SshSession, error) {
 	if knownHostKeyCallback == nil {
-		return nil, fmt.Errorf("known hosts file not found")
+		return nil, fmt.Errorf("unable to read known hosts file")
 	}
 
 	session := &sshSession{}
 	session.sftp = nil
-	session.trustServerHost = trustServerHost
+	session.trustServerHost = opt.TrustServerHost
 	config := &ssh.ClientConfig{
-		User: user,
+		User: opt.User,
 		Auth: []ssh.AuthMethod{
-			ssh.Password(password),
+			ssh.Password(opt.Password),
 		},
 		HostKeyCallback: session.serverHostKey,
 	}
-	client, err := ssh.Dial("tcp", src+":"+strconv.Itoa(port), config)
+	client, err := ssh.Dial("tcp", opt.Server+":"+strconv.Itoa(opt.Port), config)
 	if err != nil {
-		return nil, fmt.Errorf("cannot connect to ssh server %s: %w", src, err)
+		return nil, fmt.Errorf("cannot connect to ssh server %s: %w", opt.Server, err)
 	}
 	session.client = client
-	sftp, err := NewSFTPClient(client)
+	sftp, err := NewSFTPClient(client, opt.SftpConcurrency)
 	if err != nil {
 		return nil, err
 	}
 	session.sftp = sftp
 	return session, nil
+}
+
+type Options struct {
+	Server          string
+	Port            int
+	User            string
+	Password        string
+	TrustServerHost bool
+	SftpConcurrency bool
 }
 
 func init() {

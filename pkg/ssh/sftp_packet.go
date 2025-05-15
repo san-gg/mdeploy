@@ -1,4 +1,4 @@
-package mdeploy
+package ssh
 
 import (
 	"encoding"

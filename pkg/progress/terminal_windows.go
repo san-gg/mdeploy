@@ -1,6 +1,6 @@
 //go:build windows
 
-package mdeploy
+package progress
 
 import (
 	"os"
@@ -8,7 +8,7 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func getWinSize() (width int, height int, err error) {
+func GetWinSize() (width int, height int, err error) {
 	fd := os.Stdout.Fd()
 	var info windows.ConsoleScreenBufferInfo
 	if err = windows.GetConsoleScreenBufferInfo(windows.Handle(fd), &info); err != nil {

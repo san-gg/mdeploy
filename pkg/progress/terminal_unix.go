@@ -1,6 +1,6 @@
 //go:build !windows
 
-package mdeploy
+package progress
 
 import (
 	"os"
@@ -8,7 +8,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func getWinSize() (width int, height int, err error) {
+func GetWinSize() (width int, height int, err error) {
 	ws, err := unix.IoctlGetWinsize(int(os.Stdout.Fd()), unix.TIOCGWINSZ)
 	if err != nil {
 		err = os.NewSyscallError("GetWinsize", err)

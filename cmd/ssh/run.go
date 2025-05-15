@@ -1,4 +1,4 @@
-package mdeloy
+package ssh
 
 import (
 	"fmt"
@@ -6,17 +6,17 @@ import (
 	"path"
 	"path/filepath"
 
-	ssh "github.com/san-gg/mdeploy/pkg/ssh"
+	"github.com/san-gg/mdeploy/pkg/ssh"
 	"github.com/spf13/cobra"
 )
 
 type runOptions struct {
-	source string
-	user   string
-	pwd    string
+	host string
+	user string
+	pwd  string
 }
 
-var options runOptions
+var runOpt runOptions
 
 func RunCommand() *cobra.Command {
 	cmd := &cobra.Command{
@@ -24,21 +24,28 @@ func RunCommand() *cobra.Command {
 		Short: "Execute scripts on remote servers with arguments",
 		Long:  "Upload and execute script files on remote servers.",
 		Args:  cobra.MinimumNArgs(1),
-		RunE:  runRun,
+		RunE:  runCmd,
 	}
 	flags := cmd.Flags()
-	flags.StringVarP(&options.source, "source", "s", "", "server host")
-	flags.StringVarP(&options.user, "user", "u", "", "username")
-	flags.StringVarP(&options.pwd, "password", "p", "", "password")
+	flags.StringVarP(&runOpt.host, "host", "H", "", "server host")
+	flags.StringVarP(&runOpt.user, "user", "U", "", "username")
+	flags.StringVarP(&runOpt.pwd, "password", "P", "", "password")
 	return cmd
 }
 
-func runRun(cmd *cobra.Command, args []string) error {
+func runCmd(cmd *cobra.Command, args []string) error {
 	trust, err := cmd.Flags().GetBool("trust")
 	if err != nil {
 		panic(err)
 	}
-	sshsession, err := ssh.ConnectWithPassword(options.source, 22, options.user, options.pwd, trust)
+	sshsession, err := ssh.ConnectWithPassword(ssh.Options{
+		Server:          runOpt.host,
+		Port:            22,
+		User:            runOpt.user,
+		Password:        runOpt.pwd,
+		TrustServerHost: trust,
+		SftpConcurrency: false,
+	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return nil
@@ -54,17 +61,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(os.Stderr, "Unable to send file")
 		return nil
 	}
-	ch := make(chan string)
-	defer close(ch)
-	go func() {
-		for out := range ch {
-			fmt.Println(out)
-		}
-	}()
 	runfile := path.Join(workingdir, filepath.Base(args[0]))
-	if err := sshsession.Exec(ch, "sh "+runfile, args[1:]...); err != nil {
+	if err := sshsession.Exec(os.Stdout, "sh "+runfile, args[1:]...); err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		return nil
 	}
 	return nil
 }

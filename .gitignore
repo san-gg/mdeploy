@@ -1,0 +1,4 @@
+.vscode
+.known_hosts
+mdeploy
+*.out

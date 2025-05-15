@@ -1,4 +1,4 @@
-package mdeploy
+package deploy
 
 import (
 	"fmt"
