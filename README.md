@@ -28,9 +28,9 @@ sudo mv mdeploy /usr/local/bin/
 mdeploy [command] [flags]
 ```
 -  [deploy](cmd/deploy/deploy.go) - Deploy using configuration from YAML files
--  [exec](cmd/ssh/exec/exec.go) - Execute commands on remote servers
--  [run](cmd/ssh/run/run.go) - Execute scripts on remote servers with arguments
--  [copy](cmd/ssh/copy/copy.go) - Copy files between local and remote servers
+-  [exec](cmd/ssh/exec.go) - Execute commands on remote servers
+-  [run](cmd/ssh/run.go) - Execute scripts on remote servers with arguments
+-  [copy](cmd/ssh/copy.go) - Copy files between local and remote servers
 
 **Global Flags**
 -  ```-T, --trust``` - Trust SSH server host key
