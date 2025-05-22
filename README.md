@@ -1,3 +1,4 @@
+[![Go Report Card](https://goreportcard.com/badge/github.com/san-gg/mdeploy)](https://goreportcard.com/report/github.com/san-gg/mdeploy)
 ## MDeploy
 MDeploy is a command-line tool for remote server deployment and management over SSH. It simplifies common tasks such as executing commands, transferring files, and running deployment scripts on remote servers.
 
