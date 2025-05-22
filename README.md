@@ -75,13 +75,13 @@ steps:
 
 Execute commands on remote servers:
 ```bash
-mdeploy exec --host=server.example.com --user=admin --password=password123 "ls -la"
+mdeploy exec --host=server.example.com --user=admin "ls -la"
 ```
 **Run Command**
 
 Execute scripts on remote servers:
 ```bash
-mdeploy run --host=server.example.com --user=admin --password=password123 local/script.sh arg1 arg2
+mdeploy run --host=server.example.com --user=admin local/script.sh arg1 arg2
 ```
 
 **Copy Command**
@@ -89,10 +89,10 @@ mdeploy run --host=server.example.com --user=admin --password=password123 local/
 Copy files between local and remote servers:
 ```bash
 # Copy from local to remote
-mdeploy copy local/file.txt user:password@server.example.com:/path/
+mdeploy copy local/file.txt user@server.example.com:/path/
 
 # Copy from remote to local
-mdeploy copy user:password@server.example.com:/path/file.txt local/path/
+mdeploy copy user@server.example.com:/path/file.txt local/path/
 ```
 
 **Environment Variables**

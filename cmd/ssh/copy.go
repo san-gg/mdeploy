@@ -1,6 +1,7 @@
 package ssh
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/san-gg/mdeploy/pkg/progress"
 	"github.com/san-gg/mdeploy/pkg/ssh"
+	"github.com/san-gg/mdeploy/pkg/term"
 	"github.com/spf13/cobra"
 )
 
@@ -36,39 +38,44 @@ func copyCmd(cmd *cobra.Command, args []string) error {
 		panic(err)
 	}
 
-	sip, suser, spwd, spath, sok := parseRemotePath(args[0])
-	dip, duser, dpwd, dpath, dok := parseRemotePath(args[1])
+	shost, suser, spwd, spath, serr := parseRemotePath(args[0])
+	dhost, duser, dpwd, dpath, derr := parseRemotePath(args[1])
 
-	if sok && dok {
+	if errors.Is(serr, term.CtrlKeyError) || errors.Is(derr, term.CtrlKeyError) {
+		return nil
+	}
+
+	if serr != nil && derr != nil {
 		return fmt.Errorf("remote to remote copy is not supported")
 	}
 
-	if sok {
-		remoteReceive(spath, suser, sip, spwd, args[1], cmd)
+	if serr == nil {
+		remoteReceive(spath, suser, shost, spwd, args[1], cmd)
 		return nil
-	} else if dok {
-		remoteCopy(args[0], duser, dip, dpwd, dpath, cmd)
+	} else if derr == nil {
+		remoteCopy(args[0], duser, dhost, dpwd, dpath, cmd)
 		return nil
 	}
 
 	return fmt.Errorf("source ... target are not valid")
 }
 
-func parseRemotePath(remote string) (ip string, user string, password string, path string, ok bool) {
-	// user:pwd@ip:/path
+func parseRemotePath(remote string) (host string, user string, password string, path string, err error) {
+	// user@ip:/path
 	parts := strings.Split(remote, ":")
-	if len(parts) != 3 {
+	if len(parts) != 2 {
+		err = fmt.Errorf("invalid remote path: %s", remote)
 		return
 	}
-	user = parts[0]
-	path = parts[2]
-	pwdIp := strings.Split(parts[1], "@")
-	if len(pwdIp) != 2 {
+	userHost := strings.Split(parts[0], "@")
+	if len(userHost) != 2 {
+		err = fmt.Errorf("invalid remote path: %s", remote)
 		return
 	}
-	password = pwdIp[0]
-	ip = pwdIp[1]
-	ok = true
+	user = userHost[0]
+	host = userHost[1]
+	path = parts[1]
+	password, err = term.ReadPassword()
 	return
 }
 

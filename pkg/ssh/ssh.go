@@ -207,7 +207,7 @@ func (s *sshSession) receivefile(progress *progressCopy, remoteSrc, dest string)
 	return nil
 }
 
-func sftp(output io.Writer, src, dest string, sftpfunc sftpFunc, isReader bool) error {
+func sftp(output io.Writer, src, dest string, sftpfunc sftpFunc, isReader bool, isConcurrency bool) error {
 	var ch chan networkBytes
 	var progress *progressCopy
 
@@ -218,7 +218,7 @@ func sftp(output io.Writer, src, dest string, sftpfunc sftpFunc, isReader bool) 
 		go func() {
 			p := progressBar{}
 			for n := range ch {
-				output.Write([]byte(p.getProgressBarString(n)))
+				output.Write([]byte(p.getProgressBarString(n, isConcurrency)))
 			}
 		}()
 		progress = &progressCopy{
@@ -262,7 +262,7 @@ func (s *sshSession) SendFile(progress io.Writer, src string, dest string) error
 		dest = path.Join(dest, filepath.Base(src))
 	}
 
-	return sftp(progress, src, dest, s.sendfile, true)
+	return sftp(progress, src, dest, s.sendfile, true, s.sftp.useConcurrency)
 }
 
 func (s *sshSession) SendDir(progress io.Writer, src string, dest string) error {
@@ -302,9 +302,9 @@ func (s *sshSession) SendDir(progress io.Writer, src string, dest string) error 
 			if progress != nil {
 				seconds := time.Since(start).Seconds()
 				if seconds > 120 {
-					progress.Write([]byte(fmt.Sprintf("%s - %0.2f min", srcF, seconds/60)))
+					progress.Write([]byte(fmt.Sprintf("%s - %0.2f min\n", srcF, seconds/60)))
 				} else {
-					progress.Write([]byte(fmt.Sprintf("%s - %0.2f sec", srcF, seconds)))
+					progress.Write([]byte(fmt.Sprintf("%s - %0.2f sec\n", srcF, seconds)))
 				}
 			}
 		}
@@ -336,7 +336,7 @@ func (s *sshSession) ReceiveRemoteFile(progress io.Writer, remoteSrc string, des
 		}
 	}
 
-	return sftp(progress, remoteSrc, dest, s.receivefile, false)
+	return sftp(progress, remoteSrc, dest, s.receivefile, false, s.sftp.useConcurrency)
 }
 
 func (s *sshSession) ReceiveRemoteDir(progress io.Writer, remoteDir string, destDir string) error {
@@ -374,9 +374,9 @@ func (s *sshSession) ReceiveRemoteDir(progress io.Writer, remoteDir string, dest
 			if progress != nil {
 				seconds := time.Since(start).Seconds()
 				if seconds > 120 {
-					progress.Write([]byte(fmt.Sprintf("%s - %0.2f min", rsrc, seconds/60)))
+					progress.Write([]byte(fmt.Sprintf("%s - %0.2f min\n", rsrc, seconds/60)))
 				} else {
-					progress.Write([]byte(fmt.Sprintf("%s - %0.2f sec", rsrc, seconds)))
+					progress.Write([]byte(fmt.Sprintf("%s - %0.2f sec\n", rsrc, seconds)))
 				}
 			}
 		}

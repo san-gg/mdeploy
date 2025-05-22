@@ -5,15 +5,16 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 
 	"github.com/san-gg/mdeploy/pkg/ssh"
+	"github.com/san-gg/mdeploy/pkg/term"
 	"github.com/spf13/cobra"
 )
 
 type runOptions struct {
 	host string
 	user string
-	pwd  string
 }
 
 var runOpt runOptions
@@ -29,7 +30,6 @@ func RunCommand() *cobra.Command {
 	flags := cmd.Flags()
 	flags.StringVarP(&runOpt.host, "host", "H", "", "server host")
 	flags.StringVarP(&runOpt.user, "user", "U", "", "username")
-	flags.StringVarP(&runOpt.pwd, "password", "P", "", "password")
 	return cmd
 }
 
@@ -38,11 +38,16 @@ func runCmd(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		panic(err)
 	}
+	pwd, err := term.ReadPassword()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "failed to read password:", err)
+		return nil
+	}
 	sshsession, err := ssh.ConnectWithPassword(ssh.Options{
 		Server:          runOpt.host,
 		Port:            22,
 		User:            runOpt.user,
-		Password:        runOpt.pwd,
+		Password:        string(pwd),
 		TrustServerHost: trust,
 		SftpConcurrency: false,
 	})
@@ -62,7 +67,7 @@ func runCmd(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 	runfile := path.Join(workingdir, filepath.Base(args[0]))
-	if err := sshsession.Exec(os.Stdout, "sh "+runfile, args[1:]...); err != nil {
+	if err := sshExec(sshsession, fmt.Sprintf("sh %s %s", runfile, strings.Join(args[1:], " "))); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 	}
 	return nil

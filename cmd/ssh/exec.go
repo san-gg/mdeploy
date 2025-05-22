@@ -5,13 +5,13 @@ import (
 	"os"
 
 	"github.com/san-gg/mdeploy/pkg/ssh"
+	"github.com/san-gg/mdeploy/pkg/term"
 	"github.com/spf13/cobra"
 )
 
 type execOptions struct {
 	host string
 	user string
-	pwd  string
 }
 
 var execOpt execOptions
@@ -27,7 +27,6 @@ func ExecCommand() *cobra.Command {
 	flags := cmd.Flags()
 	flags.StringVarP(&execOpt.host, "host", "H", "", "server host")
 	flags.StringVarP(&execOpt.user, "user", "U", "", "username")
-	flags.StringVarP(&execOpt.pwd, "password", "P", "", "password")
 	return cmd
 }
 
@@ -36,11 +35,16 @@ func execCmd(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		panic(err)
 	}
+	pwd, err := term.ReadPassword()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "failed to read password:", err)
+		return nil
+	}
 	sshsession, err := ssh.ConnectWithPassword(ssh.Options{
 		Server:          execOpt.host,
 		Port:            22,
 		User:            execOpt.user,
-		Password:        execOpt.pwd,
+		Password:        string(pwd),
 		TrustServerHost: trust,
 		SftpConcurrency: false,
 	})
@@ -49,10 +53,16 @@ func execCmd(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 	defer sshsession.Close()
-	if err := sshsession.Exec(NewLineWriter{}, args[0]); err != nil {
+	if err := sshExec(sshsession, args[0]); err != nil {
 		fmt.Fprintln(os.Stderr, "failed to execute command:", err)
+		return nil
 	}
 	return nil
+}
+
+func sshExec(sshsession ssh.SshSession, cmd string) (err error) {
+	err = sshsession.Exec(NewLineWriter{}, cmd)
+	return
 }
 
 type NewLineWriter struct{}

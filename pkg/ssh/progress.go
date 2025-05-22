@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/san-gg/mdeploy/pkg/progress"
+	"github.com/san-gg/mdeploy/pkg/term"
 )
 
 type networkBytes struct {
@@ -79,11 +79,11 @@ type progressBar struct {
 	speed float64 // per sec
 }
 
-func (p *progressBar) getProgressBarString(net networkBytes) string {
+func (p *progressBar) getProgressBarString(net networkBytes, showSpeed bool) string {
 	var currspeed, bytesRead string
-	if net.duration != 0 {
+	if net.duration != 0 && showSpeed {
 		curr_speed := float64(net.bytesTransferred) / net.duration.Seconds()
-		p.speed = p.speed*0.7 + curr_speed*0.3 //EMA
+		p.speed = p.speed*0.9 + curr_speed*0.1 //EMA
 		if p.speed < 1000 {
 			currspeed = fmt.Sprintf("%.1f B/s", p.speed)
 		} else if p.speed < (1000 * 1000) {
@@ -94,7 +94,7 @@ func (p *progressBar) getProgressBarString(net networkBytes) string {
 			currspeed = fmt.Sprintf("%.1f GB/s", p.speed/(1024*1024*1024))
 		}
 	}
-	width, _, err := progress.GetWinSize()
+	width, _, err := term.GetWinSize()
 	if err != nil {
 		return fmt.Sprintf("Error getting window size: %v", err)
 	}
@@ -112,5 +112,8 @@ func (p *progressBar) getProgressBarString(net networkBytes) string {
 	}
 	r := strings.Repeat("=", int(percentage*(float32(width)/100)))
 	pad := strings.Repeat(" ", width-len(r))
-	return fmt.Sprintf("[%s>%s]  %d%% %s  %s", r, pad, int(percentage), bytesRead, currspeed)
+	if showSpeed {
+		return fmt.Sprintf("[%s>%s]  %d%% %s  %s", r, pad, int(percentage), bytesRead, currspeed)
+	}
+	return fmt.Sprintf("[%s>%s]  %d%%  %s", r, pad, int(percentage), bytesRead)
 }

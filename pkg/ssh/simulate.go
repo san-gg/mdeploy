@@ -24,7 +24,7 @@ func CopyProgressBar(output io.Writer) {
 	go func() {
 		p := progressBar{}
 		for n := range ch {
-			output.Write([]byte(p.getProgressBarString(n)))
+			output.Write([]byte(p.getProgressBarString(n, true)))
 		}
 	}()
 	progress := &progressCopy{

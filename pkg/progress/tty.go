@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/morikuni/aec"
+	"github.com/san-gg/mdeploy/pkg/term"
 )
 
 type colorFunc func(string) string
@@ -191,7 +192,7 @@ func (t *ttyWriter) print() {
 	defer func() {
 		fmt.Fprint(os.Stdout, aec.Show)
 	}()
-	window_width, window_height, err := GetWinSize()
+	window_width, window_height, err := term.GetWinSize()
 	window_height -= 4
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error getting window size: ", err)
